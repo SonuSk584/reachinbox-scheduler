@@ -1,0 +1,13 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1792048706059,
+      "tag": "0000_brainy_night_thrasher",
+      "breakpoints": true
+    }
+  ]
+}
