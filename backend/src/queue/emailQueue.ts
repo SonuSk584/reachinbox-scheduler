@@ -6,6 +6,11 @@ export const EMAIL_QUEUE_NAME = 'email-send';
 
 export interface EmailJobData {
   emailId: string;
+  /**
+   * Epoch ms of the send slot this job has already reserved in Redis. Persisted on the job so a
+   * restart, stall or re-delivery reuses the reservation instead of consuming a second slot.
+   */
+  slotAt?: number;
 }
 
 export const emailQueue = new Queue<EmailJobData>(EMAIL_QUEUE_NAME, {

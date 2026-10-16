@@ -1,4 +1,4 @@
-import { Job, Worker } from 'bullmq';
+import { DelayedError, Job, Worker } from 'bullmq';
 import { and, eq, sql } from 'drizzle-orm';
 import { env } from '../config/env';
 import { db } from '../db/client';
@@ -6,15 +6,69 @@ import { batches, emails, senders } from '../db/schema';
 import { createRedisConnection } from '../queue/connection';
 import { EMAIL_QUEUE_NAME, type EmailJobData } from '../queue/emailQueue';
 import { sendMail } from '../services/mailer';
+import { acquireSendSlot, sleep } from '../services/rateLimiter';
+import { notifyRateLimitHit } from '../services/rateLimitNotifier';
 import { logger } from '../utils/logger';
 
-export async function processEmailJob(job: Job<EmailJobData>) {
+const HOUR_MS = 3_600_000;
+
+/** Park this job until `at` (epoch ms) without consuming a retry attempt, and show the new time in the UI. */
+async function deferJob(job: Job<EmailJobData>, token: string | undefined, emailId: string, at: number): Promise<never> {
+  await db
+    .update(emails)
+    .set({ scheduledAt: new Date(at), updatedAt: new Date() })
+    .where(and(eq(emails.id, emailId), eq(emails.status, 'scheduled')));
+  await job.moveToDelayed(at, token);
+  throw new DelayedError(); // tells BullMQ "I moved this job myself": not a failure, not a retry
+}
+
+export async function processEmailJob(job: Job<EmailJobData>, token?: string) {
   const { emailId } = job.data;
 
-  // IDEMPOTENCY (layer 2): atomic claim. Only ONE worker can flip scheduled -> sending:
-  // MySQL evaluates the WHERE + SET as a single atomic row update, so exactly one
-  // concurrent UPDATE sees affectedRows = 1. Retries, stalled-job recovery, and
-  // duplicate jobs all get 0 and skip.
+  const [row] = await db
+    .select({
+      status: emails.status,
+      senderId: emails.senderId,
+      senderEmail: senders.email,
+      hourlyLimit: batches.hourlyLimit,
+    })
+    .from(emails)
+    .innerJoin(batches, eq(emails.batchId, batches.id))
+    .innerJoin(senders, eq(emails.senderId, senders.id))
+    .where(eq(emails.id, emailId));
+
+  if (!row || row.status !== 'scheduled') {
+    logger.warn(`Skipping ${emailId}: already claimed/sent (idempotency guard)`);
+    return { skipped: true };
+  }
+
+  // ---- RATE LIMIT + MIN DELAY: reserve a send slot for this sender (atomic, in Redis) ----
+  let slotAt = job.data.slotAt; // already reserved on an earlier pass (parked job waking up, restart, stall)
+  if (slotAt === undefined) {
+    const limit = row.hourlyLimit ?? env.MAX_EMAILS_PER_HOUR_PER_SENDER;
+    const slot = await acquireSendSlot(row.senderId, limit);
+
+    if (slot.hitHourlyLimit) {
+      await notifyRateLimitHit({ senderId: row.senderId, senderEmail: row.senderEmail, limit, deferredUntil: slot.slotAt });
+    }
+    if (slot.slotAt === null) {
+      // Every window inside the horizon is full. Never drop: look again in an hour.
+      return deferJob(job, token, emailId, Date.now() + HOUR_MS);
+    }
+    slotAt = slot.slotAt;
+    await job.updateData({ emailId, slotAt }); // persist the reservation so it is never counted twice
+  }
+
+  const wait = slotAt - Date.now();
+  if (wait > env.INLINE_WAIT_MAX_MS) {
+    // Far away (next hour, or a long backlog): park as a delayed job rather than hold a worker slot.
+    return deferJob(job, token, emailId, slotAt);
+  }
+  if (wait > 0) await sleep(wait); // short wait: this is what spaces sends by the minimum delay
+
+  if (job.data.slotAt !== undefined) await job.updateData({ emailId }); // reservation used; a retry must book a new slot
+
+  // ---- IDEMPOTENCY (layer 2): atomic claim. Only ONE worker can flip scheduled -> sending. ----
   const [claim] = await db
     .update(emails)
     .set({ status: 'sending', attempts: sql`${emails.attempts} + 1`, error: null, updatedAt: new Date() })
@@ -67,6 +121,9 @@ export function startEmailWorker() {
 
   worker.on('failed', (job, err) => logger.error(`Job ${job?.id} failed: ${err.message}`));
   worker.on('error', (err) => logger.error('Worker error', err.message));
-  logger.info(`Email worker started (concurrency=${env.WORKER_CONCURRENCY})`);
+  logger.info(
+    `Email worker started (concurrency=${env.WORKER_CONCURRENCY}, min delay=${env.MIN_DELAY_BETWEEN_SENDS_MS}ms, ` +
+      `default limit=${env.MAX_EMAILS_PER_HOUR_PER_SENDER}/hour per sender)`,
+  );
   return worker;
 }

@@ -15,6 +15,11 @@ const schema = z.object({
   MAX_EMAILS_PER_HOUR_PER_SENDER: z.coerce.number().int().positive().default(200),
   JOB_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
   STALE_SENDING_MINUTES: z.coerce.number().int().positive().default(5),
+  // A job whose send slot is further away than this is parked as a delayed job instead of
+  // sleeping inside the worker (sleeping too long would let BullMQ's job lock expire).
+  INLINE_WAIT_MAX_MS: z.coerce.number().int().nonnegative().default(10_000),
+  // How many hourly windows ahead we are willing to book before parking a job for an hour.
+  RATE_LIMIT_HORIZON_HOURS: z.coerce.number().int().positive().default(336),
 });
 
 const parsed = schema.safeParse(process.env);
