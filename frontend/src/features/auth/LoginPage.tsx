@@ -1,5 +1,5 @@
-import { useState, type FormEvent } from 'react';
-import { Navigate, useLocation } from 'react-router-dom';
+import { useEffect, useState, type FormEvent } from 'react';
+import { Navigate, useLocation, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { Button, Input, PageSpinner } from '@/components/ui';
 import { env } from '@/config/env';
@@ -9,9 +9,18 @@ import { useAuth } from './useAuth';
 export function LoginPage() {
   const { user, isLoading, refresh } = useAuth();
   const location = useLocation();
+  const [params, setParams] = useSearchParams();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [checking, setChecking] = useState(false);
+
+  // The backend sends failed Google sign-ins back here as /login?error=<message>.
+  useEffect(() => {
+    const message = params.get('error');
+    if (!message) return;
+    toast.error(message);
+    setParams({}, { replace: true }); // so a refresh does not show it again
+  }, [params, setParams]);
 
   if (isLoading) return <PageSpinner />;
   if (user) return <Navigate to={(location.state as { from?: string } | null)?.from ?? '/scheduled'} replace />;

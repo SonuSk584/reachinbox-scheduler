@@ -1,4 +1,5 @@
 import { screen } from '@testing-library/react';
+import { Toaster } from 'sonner';
 import { Route, Routes } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 import { LoginPage } from './LoginPage';
@@ -27,5 +28,17 @@ describe('auth routing', () => {
     mockApi({ '/api/auth/me': user });
     renderWithProviders(tree, '/scheduled');
     expect(await screen.findByText('Inbox')).toBeInTheDocument();
+  });
+
+  it('shows the message when Google sign-in sends the user back with an error', async () => {
+    mockApi({ '/api/auth/me': () => ({ status: 401, body: { error: 'Not authenticated' } }) });
+    renderWithProviders(
+      <>
+        {tree}
+        <Toaster />
+      </>,
+      '/login?error=Google%20sign-in%20was%20cancelled',
+    );
+    expect(await screen.findByText('Google sign-in was cancelled')).toBeInTheDocument();
   });
 });

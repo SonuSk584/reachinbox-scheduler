@@ -6,6 +6,20 @@ const schema = z.object({
   FRONTEND_URL: z.string().default('http://localhost:5173'),
   AUTH_MODE: z.enum(['dev', 'google']).default('dev'),
 
+  // --- Google OAuth (required when AUTH_MODE=google) ---
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+  // Must exactly match an "Authorized redirect URI" in the Google Cloud console.
+  GOOGLE_REDIRECT_URI: z.string().default('http://localhost:5173/api/auth/google/callback'),
+  // Google's endpoints. Only overridden in tests, to point at a stand-in server.
+  GOOGLE_AUTH_URL: z.string().default('https://accounts.google.com/o/oauth2/v2/auth'),
+  GOOGLE_TOKEN_URL: z.string().default('https://oauth2.googleapis.com/token'),
+  GOOGLE_USERINFO_URL: z.string().default('https://openidconnect.googleapis.com/v1/userinfo'),
+
+  SESSION_TTL_DAYS: z.coerce.number().int().positive().default(7),
+  // Set true when served over HTTPS so the session cookie is never sent over plain HTTP.
+  COOKIE_SECURE: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().default('redis://localhost:6379'),
   ELASTICSEARCH_URL: z.string().default('http://localhost:9200'),
@@ -26,6 +40,11 @@ const schema = z.object({
 const parsed = schema.safeParse(process.env);
 if (!parsed.success) {
   console.error('Invalid environment configuration:', parsed.error.flatten().fieldErrors);
+  process.exit(1);
+}
+
+if (parsed.data.AUTH_MODE === 'google' && (!parsed.data.GOOGLE_CLIENT_ID || !parsed.data.GOOGLE_CLIENT_SECRET)) {
+  console.error('AUTH_MODE=google needs GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in backend/.env (or set AUTH_MODE=dev).');
   process.exit(1);
 }
 

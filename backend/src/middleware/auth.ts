@@ -4,6 +4,8 @@ import { eq } from 'drizzle-orm';
 import { env } from '../config/env';
 import { db } from '../db/client';
 import { users } from '../db/schema';
+import { getSessionUserId, SESSION_COOKIE } from '../services/session';
+import { readCookie } from '../utils/cookies';
 import { HttpError } from './errorHandler';
 
 declare global {
@@ -28,8 +30,9 @@ async function getDevUserId() {
 }
 
 /**
- * Phase 5 replaces the 'google' branch with real session/JWT verification.
- * AUTH_MODE=dev lets us build and test the backend before OAuth exists.
+ * Puts the logged-in user's id on `req.userId`, or responds 401.
+ *  - AUTH_MODE=google: looks the session cookie up in Redis
+ *  - AUTH_MODE=dev:    skips login and acts as a local dev user (development only)
  */
 export async function requireAuth(req: Request, _res: Response, next: NextFunction) {
   try {
@@ -37,7 +40,11 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
       req.userId = await getDevUserId();
       return next();
     }
-    throw new HttpError(401, 'Not authenticated');
+    const sessionId = readCookie(req, SESSION_COOKIE);
+    const userId = sessionId ? await getSessionUserId(sessionId) : null;
+    if (!userId) throw new HttpError(401, 'Not authenticated');
+    req.userId = userId;
+    next();
   } catch (err) {
     next(err);
   }
