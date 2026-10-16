@@ -1,5 +1,5 @@
 import { NavLink, useNavigate } from 'react-router-dom';
-import { Clock, Send, type LucideIcon } from 'lucide-react';
+import { Activity, Clock, Send, type LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui';
 import { useCounts } from '@/hooks/useEmails';
 import { cn } from '@/lib/cn';
@@ -47,6 +47,16 @@ export function Sidebar() {
         <NavItem to="/scheduled" label="Scheduled" icon={Clock} count={counts?.scheduled} />
         <NavItem to="/sent" label="Sent" icon={Send} count={counts ? counts.sent + counts.failed : undefined} />
       </nav>
+
+      <a
+        href="/admin/queues"
+        target="_blank"
+        rel="noreferrer"
+        className="mt-auto flex h-9 items-center gap-2.5 rounded-lg px-3 text-xs text-ink-soft transition-colors hover:bg-field"
+      >
+        <Activity aria-hidden className="size-4" />
+        Queue dashboard
+      </a>
     </aside>
   );
 }

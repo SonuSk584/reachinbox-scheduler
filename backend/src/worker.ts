@@ -1,12 +1,14 @@
 import { pool } from './db/client';
 import { emailQueue } from './queue/emailQueue';
 import { reconcile } from './services/reconcile';
+import { reindexIfDrifted } from './services/searchService';
 import { startEmailWorker } from './workers/emailWorker';
 import { logger } from './utils/logger';
 
 async function main() {
   await reconcile(); // heal MySQL <-> Redis drift BEFORE accepting jobs
   const worker = startEmailWorker();
+  void reindexIfDrifted(); // background: create the search index, and rebuild it if it is empty or out of date
 
   const shutdown = async () => {
     logger.info('Shutting down worker (finishing in-flight jobs)...');

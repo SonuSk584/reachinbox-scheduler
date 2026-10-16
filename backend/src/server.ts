@@ -1,8 +1,12 @@
+import { createBullBoard } from '@bull-board/api';
+import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
+import { ExpressAdapter } from '@bull-board/express';
 import cors from 'cors';
 import express from 'express';
 import { env } from './config/env';
 import { pool } from './db/client';
 import { emailQueue } from './queue/emailQueue';
+import { requireAuth } from './middleware/auth';
 import { errorHandler } from './middleware/errorHandler';
 import routes from './routes';
 import { logger } from './utils/logger';
@@ -20,6 +24,12 @@ app.get('/health', async (_req, res) => {
     res.status(503).json({ ok: false });
   }
 });
+
+// Live BullMQ dashboard: waiting / delayed / active / completed / failed jobs, updating in real time.
+const boardAdapter = new ExpressAdapter();
+boardAdapter.setBasePath('/admin/queues');
+createBullBoard({ queues: [new BullMQAdapter(emailQueue)], serverAdapter: boardAdapter });
+app.use('/admin/queues', requireAuth, boardAdapter.getRouter());
 
 app.use('/api', routes);
 app.use(errorHandler);

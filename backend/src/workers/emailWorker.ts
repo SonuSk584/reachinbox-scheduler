@@ -8,6 +8,7 @@ import { EMAIL_QUEUE_NAME, type EmailJobData } from '../queue/emailQueue';
 import { sendMail } from '../services/mailer';
 import { acquireSendSlot, sleep } from '../services/rateLimiter';
 import { notifyRateLimitHit } from '../services/rateLimitNotifier';
+import { syncInBackground } from '../services/searchService';
 import { logger } from '../utils/logger';
 
 const HOUR_MS = 3_600_000;
@@ -18,6 +19,7 @@ async function deferJob(job: Job<EmailJobData>, token: string | undefined, email
     .update(emails)
     .set({ scheduledAt: new Date(at), updatedAt: new Date() })
     .where(and(eq(emails.id, emailId), eq(emails.status, 'scheduled')));
+  syncInBackground(emailId); // the new time shows up in search too
   await job.moveToDelayed(at, token);
   throw new DelayedError(); // tells BullMQ "I moved this job myself": not a failure, not a retry
 }
@@ -94,6 +96,7 @@ export async function processEmailJob(job: Job<EmailJobData>, token?: string) {
       .update(emails)
       .set({ status: isFinalAttempt ? 'failed' : 'scheduled', error: message, updatedAt: new Date() })
       .where(eq(emails.id, emailId));
+    syncInBackground(emailId);
     throw err; // lets BullMQ apply backoff / mark job failed
   }
 
@@ -109,6 +112,7 @@ export async function processEmailJob(job: Job<EmailJobData>, token?: string) {
     })
     .where(eq(emails.id, emailId));
 
+  syncInBackground(emailId);
   logger.info(`Sent ${emailId} -> ${claimed.toEmail}`);
   return { sent: true };
 }

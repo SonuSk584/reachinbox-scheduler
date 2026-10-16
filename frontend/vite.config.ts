@@ -11,6 +11,10 @@ export default defineConfig({
     port: 5173,
     // Same-origin in dev: the browser talks to :5173 and Vite forwards /api to the backend,
     // so session cookies work later without any CORS setup.
-    proxy: { '/api': { target: process.env.VITE_BACKEND_URL ?? 'http://localhost:4000', changeOrigin: true } },
+    proxy: {
+      '/api': { target: process.env.VITE_BACKEND_URL ?? 'http://localhost:4000', changeOrigin: true },
+      // Bull Board (live queue dashboard) is served by the backend
+      '/admin': { target: process.env.VITE_BACKEND_URL ?? 'http://localhost:4000', changeOrigin: true },
+    },
   },
 });

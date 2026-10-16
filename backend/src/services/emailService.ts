@@ -4,6 +4,7 @@ import { db } from '../db/client';
 import { batches, emails, senders, type EmailStatus } from '../db/schema';
 import { enqueueEmails } from '../queue/emailQueue';
 import { HttpError } from '../middleware/errorHandler';
+import { searchEmailIds, syncInBackground, warnSearchDown } from './searchService';
 
 export interface ScheduleInput {
   senderId: string;
@@ -85,6 +86,7 @@ export async function scheduleBatch(userId: string, input: ScheduleInput) {
   // 2) Then enqueue. If this fails the rows still exist as 'scheduled' and the
   //    worker's boot-time reconcile() will enqueue them - nothing is lost.
   await enqueueEmails(inserted);
+  syncInBackground(inserted.map((r) => r.id)); // searchable within about a second; never blocks or fails the request
 
   return {
     batchId,
@@ -102,8 +104,45 @@ const KIND_STATUSES: Record<ListKind, EmailStatus[]> = {
   sent: ['sent', 'failed'],
 };
 
+const listColumns = {
+  id: emails.id,
+  toEmail: emails.toEmail,
+  subject: batches.subject,
+  snippet: sql<string>`LEFT(TRIM(REGEXP_REPLACE(${batches.body}, '<[^>]*>', ' ')), 120)`,
+  status: emails.status,
+  scheduledAt: emails.scheduledAt,
+  sentAt: emails.sentAt,
+  updatedAt: emails.updatedAt,
+  previewUrl: emails.previewUrl,
+  error: emails.error,
+};
+
+/**
+ * Lists a user's scheduled or sent emails.
+ * Without `q`: a plain MySQL query. With `q`: Elasticsearch picks the matching emails and MySQL
+ * supplies the rows (so the response shape never changes). If Elasticsearch is unreachable the
+ * search quietly falls back to a MySQL substring match, and `engine` says which one answered.
+ */
 export async function listEmails(userId: string, kind: ListKind, page: number, limit: number, q?: string) {
-  // Simple substring search for now. Phase 4 swaps this for Elasticsearch behind the same `q` param.
+  if (q) {
+    try {
+      const { ids, total } = await searchEmailIds(userId, KIND_STATUSES[kind], q, kind, page, limit);
+      const rows = ids.length
+        ? await db
+            .select(listColumns)
+            .from(emails)
+            .innerJoin(batches, eq(emails.batchId, batches.id))
+            .where(and(eq(emails.userId, userId), inArray(emails.id, ids)))
+        : [];
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      const items = ids.map((id) => byId.get(id)).filter((r): r is NonNullable<typeof r> => r !== undefined);
+      return { items, page, limit, total, engine: 'elasticsearch' as const };
+    } catch (err) {
+      warnSearchDown('search', err); // fall through to MySQL below
+    }
+  }
+
+  // Substring match used when there is no query, or as the fallback when Elasticsearch is down.
   const term = q ? `%${q.replace(/[\\%_]/g, '\\$&')}%` : undefined;
   const where = and(
     eq(emails.userId, userId),
@@ -112,18 +151,7 @@ export async function listEmails(userId: string, kind: ListKind, page: number, l
   );
 
   const items = await db
-    .select({
-      id: emails.id,
-      toEmail: emails.toEmail,
-      subject: batches.subject,
-      snippet: sql<string>`LEFT(TRIM(REGEXP_REPLACE(${batches.body}, '<[^>]*>', ' ')), 120)`,
-      status: emails.status,
-      scheduledAt: emails.scheduledAt,
-      sentAt: emails.sentAt,
-      updatedAt: emails.updatedAt,
-      previewUrl: emails.previewUrl,
-      error: emails.error,
-    })
+    .select(listColumns)
     .from(emails)
     .innerJoin(batches, eq(emails.batchId, batches.id))
     .where(where)
@@ -136,7 +164,7 @@ export async function listEmails(userId: string, kind: ListKind, page: number, l
     .from(emails)
     .innerJoin(batches, eq(emails.batchId, batches.id))
     .where(where);
-  return { items, page, limit, total };
+  return { items, page, limit, total, ...(q ? { engine: 'sql' as const } : {}) };
 }
 
 export async function getCounts(userId: string) {

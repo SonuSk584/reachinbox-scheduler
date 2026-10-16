@@ -9,6 +9,7 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().default('redis://localhost:6379'),
   ELASTICSEARCH_URL: z.string().default('http://localhost:9200'),
+  ELASTICSEARCH_INDEX: z.string().default('emails'),
 
   WORKER_CONCURRENCY: z.coerce.number().int().positive().default(5),
   MIN_DELAY_BETWEEN_SENDS_MS: z.coerce.number().int().nonnegative().default(2000),
