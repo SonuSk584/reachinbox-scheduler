@@ -1,30 +1,54 @@
+import { eq } from 'drizzle-orm';
+import { db } from '../db/client';
+import { senders } from '../db/schema';
 import { logger } from '../utils/logger';
 import { redis } from './rateLimiter';
+import { getConnection, sendSlackMessage } from './slackService';
+
+const HOUR_MS = 3_600_000;
 
 export interface RateLimitHit {
   senderId: string;
   senderEmail: string;
   limit: number;
-  /** Epoch ms when the deferred email will now go out. */
-  deferredUntil: number | null;
+  /** The current hourly window (hours since 1970). */
+  window: number;
+  /** true if an email was actually pushed back; false if the limit was only just filled. */
+  overflowed: boolean;
 }
 
+/** Slack renders this in each reader's own timezone. */
+const slackTime = (ms: number) => `<!date^${Math.floor(ms / 1000)}^{date_short_pretty} at {time}|${new Date(ms).toISOString()}>`;
+
 /**
- * Called whenever an email is pushed back by the hourly limit.
- * Deduplicated so each sender triggers ONE notification per hour, not one per deferred email
- * (with 1000 queued emails that would otherwise be 800+ messages).
+ * Called when a sender fills its hourly limit. Posts ONE Slack message per sender per hour (with
+ * 1000 queued emails an alert per email would be spam).
  *
- * Phase 6 plugs the real Slack message in at the marked spot.
+ *  - Not connected to Slack: nothing happens, no error, and the once-per-hour slot is NOT used up,
+ *    so if they connect a minute later the very next event notifies them (no restart or redeploy).
+ *  - Slack unreachable: the slot is released so the next event tries again.
  */
 export async function notifyRateLimitHit(hit: RateLimitHit) {
-  const hour = Math.floor(Date.now() / 3_600_000);
-  const firstThisHour = await redis.set(`rl:{${hit.senderId}}:notified:${hour}`, '1', 'EX', 7200, 'NX');
-  if (!firstThisHour) return;
+  const [sender] = await db.select({ userId: senders.userId }).from(senders).where(eq(senders.id, hit.senderId));
+  if (!sender) return;
 
-  const until = hit.deferredUntil ? new Date(hit.deferredUntil).toISOString() : 'a later hour';
-  logger.warn(
-    `Hourly limit reached for sender ${hit.senderEmail} (${hit.limit}/hour). Further emails are deferred, next at ${until}`,
-  );
+  const connection = await getConnection(sender.userId);
+  if (!connection) return;
 
-  // Phase 6: send the Slack notification here.
+  const key = `rl:{${hit.senderId}}:notified:${hit.window}`;
+  if (!(await redis.set(key, '1', 'EX', 7200, 'NX'))) return; // already told them this hour
+
+  const resetAt = (hit.window + 1) * HOUR_MS;
+  const what = hit.overflowed
+    ? 'New emails from this sender are being rescheduled, and sending resumes'
+    : 'That was the last email allowed this hour; further emails will be rescheduled, and sending resumes';
+  const text =
+    `:warning: *Hourly sending limit reached* for \`${hit.senderEmail}\` (${hit.limit}/hour).\n` +
+    `${what} at ${slackTime(resetAt)}. Nothing is lost: every email will still be sent.`;
+
+  if (await sendSlackMessage(connection, text)) {
+    logger.info(`Slack alert sent for ${hit.senderEmail} (limit ${hit.limit}/hour)`);
+  } else {
+    await redis.del(key);
+  }
 }

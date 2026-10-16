@@ -1,6 +1,7 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { PenSquare } from 'lucide-react';
 import { IconButton } from '@/components/ui';
+import { useSlackRedirectToast } from '@/hooks/useSlack';
 import { cn } from '@/lib/cn';
 import { Sidebar } from './Sidebar';
 
@@ -10,6 +11,7 @@ const tabClass = ({ isActive }: { isActive: boolean }) =>
 /** Sidebar + main pane. Used by the Scheduled and Sent inboxes. Below `md` the sidebar becomes a slim top bar. */
 export function AppLayout() {
   const navigate = useNavigate();
+  useSlackRedirectToast(); // shows the result when Slack sends the user back after connecting
   return (
     <div className="flex h-full max-md:flex-col">
       <Sidebar />

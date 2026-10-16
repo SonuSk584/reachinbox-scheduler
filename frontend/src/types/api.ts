@@ -72,3 +72,11 @@ export interface ScheduleEmailResult {
   firstSendAt: string;
   lastSendAt: string;
 }
+
+export interface SlackStatus {
+  /** false when the server has no Slack app credentials, so connecting cannot work. */
+  configured: boolean;
+  connected: boolean;
+  teamName: string | null;
+  channel: string | null;
+}

@@ -16,6 +16,15 @@ const schema = z.object({
   GOOGLE_TOKEN_URL: z.string().default('https://oauth2.googleapis.com/token'),
   GOOGLE_USERINFO_URL: z.string().default('https://openidconnect.googleapis.com/v1/userinfo'),
 
+  // --- Slack OAuth (optional: without these, "Connect Slack" reports that Slack is not configured) ---
+  SLACK_CLIENT_ID: z.string().optional(),
+  SLACK_CLIENT_SECRET: z.string().optional(),
+  // Slack requires HTTPS, so in development this is your ngrok address + /api/slack/callback.
+  SLACK_REDIRECT_URI: z.string().optional(),
+  // Slack's endpoints. Only overridden in tests, to point at a stand-in server.
+  SLACK_AUTH_URL: z.string().default('https://slack.com/oauth/v2/authorize'),
+  SLACK_TOKEN_URL: z.string().default('https://slack.com/api/oauth.v2.access'),
+
   SESSION_TTL_DAYS: z.coerce.number().int().positive().default(7),
   // Set true when served over HTTPS so the session cookie is never sent over plain HTTP.
   COOKIE_SECURE: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),

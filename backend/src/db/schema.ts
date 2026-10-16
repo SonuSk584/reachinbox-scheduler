@@ -91,6 +91,19 @@ export const emailsRelations = relations(emails, ({ one }) => ({
   sender: one(senders, { fields: [emails.senderId], references: [senders.id] }),
 }));
 
+// One Slack workspace connection per user. The incoming webhook URL is what we post alerts to.
+export const slackConnections = mysqlTable('slack_connections', {
+  id: id(),
+  userId: varchar('user_id', { length: 36 }).notNull().unique().references(() => users.id, { onDelete: 'cascade' }),
+  teamId: varchar('team_id', { length: 64 }),
+  teamName: varchar('team_name', { length: 255 }),
+  channelId: varchar('channel_id', { length: 64 }),
+  channel: varchar('channel', { length: 255 }),
+  webhookUrl: varchar('webhook_url', { length: 500 }).notNull(), // a secret: anyone holding it can post to that channel
+  createdAt: ts('created_at').notNull().default(now),
+});
+
+export type SlackConnection = typeof slackConnections.$inferSelect;
 export type User = typeof users.$inferSelect;
 export type Sender = typeof senders.$inferSelect;
 export type Batch = typeof batches.$inferSelect;

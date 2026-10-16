@@ -50,8 +50,19 @@ export async function processEmailJob(job: Job<EmailJobData>, token?: string) {
     const limit = row.hourlyLimit ?? env.MAX_EMAILS_PER_HOUR_PER_SENDER;
     const slot = await acquireSendSlot(row.senderId, limit);
 
-    if (slot.hitHourlyLimit) {
-      await notifyRateLimitHit({ senderId: row.senderId, senderEmail: row.senderEmail, limit, deferredUntil: slot.slotAt });
+    // Alert when this booking used up the sender's last slot for the CURRENT hour, or when an email
+    // had to be pushed back. (Slots booked for future hours are not "the limit being hit" now.)
+    const currentWindow = Math.floor(slot.nowMs / HOUR_MS);
+    const filledNow = slot.slotAt !== null && slot.window === currentWindow && slot.usedInWindow >= limit;
+    if (slot.hitHourlyLimit || filledNow) {
+      // Fire-and-forget: Slack being slow or down must never delay or fail an email send.
+      void notifyRateLimitHit({
+        senderId: row.senderId,
+        senderEmail: row.senderEmail,
+        limit,
+        window: currentWindow,
+        overflowed: slot.hitHourlyLimit,
+      }).catch((err) => logger.warn(`Rate-limit notification failed: ${err instanceof Error ? err.message : err}`));
     }
     if (slot.slotAt === null) {
       // Every window inside the horizon is full. Never drop: look again in an hour.
