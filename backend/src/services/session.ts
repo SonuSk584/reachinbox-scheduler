@@ -17,8 +17,8 @@ const key = (id: string) => `sess:${id}`;
 export const SESSION_COOKIE = 'sid';
 
 export const sessionCookieOptions = {
-  httpOnly: true, // JavaScript on the page can never read it
-  sameSite: 'lax' as const, // not sent on cross-site POSTs, which blocks CSRF
+  httpOnly: true,
+  sameSite: env.COOKIE_SECURE ? ('none' as const) : ('lax' as const),
   secure: env.COOKIE_SECURE,
   maxAge: TTL_SECONDS * 1000,
   path: '/',
