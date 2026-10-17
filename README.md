@@ -1,52 +1,47 @@
 # ReachInbox Email Scheduler
 
-A full-stack email scheduling application built with **React, TypeScript, Express, BullMQ, Redis, MySQL, Drizzle ORM, Elasticsearch, and Ethereal Email**.
+A full-stack email scheduling application built with **React, TypeScript, Express, BullMQ, Redis, MySQL, Drizzle ORM, Elasticsearch and Ethereal Email**.
 
-The application lets authenticated users compose email batches, upload recipient lists, schedule emails, monitor scheduled and sent messages, search email records, and receive Slack notifications when a sender reaches its hourly sending limit.
+Signed-in users compose an email, add recipients (typed, pasted or uploaded from a CSV/TXT file), and send it now or at a future time. Every recipient becomes its own tracked email. A background worker sends them with a **minimum gap between sends** and an **hourly cap per sender**, survives restarts without losing or duplicating mail, and posts to Slack when a sender hits its limit.
 
-> **Email testing note:** The configured mail transport uses Ethereal Email for development and demonstrations. Ethereal captures test messages and provides preview URLs; it does not deliver messages to real recipient inboxes.
-
----
+> **Testing note:** the mail transport uses [Ethereal](https://ethereal.email), a fake SMTP service. Ethereal captures messages and gives a preview URL; it does **not** deliver to real inboxes.
 
 ## Table of Contents
 
 - [Features](#features)
 - [Technology Stack](#technology-stack)
-- [Architecture Overview](#architecture-overview)
-- [Prerequisites](#prerequisites)
-- [Environment Configuration](#environment-configuration)
-- [Run the Application Locally](#run-the-application-locally)
+- [Architecture](#architecture)
+- [Project Structure](#project-structure)
+- [Run Locally](#run-locally)
+- [Configuration Reference](#configuration-reference)
 - [How Scheduling Works](#how-scheduling-works)
 - [Persistence and Restart Recovery](#persistence-and-restart-recovery)
 - [Rate Limiting and Concurrency](#rate-limiting-and-concurrency)
-- [Ethereal Email Setup and Testing](#ethereal-email-setup-and-testing)
 - [Google Login](#google-login)
-- [Slack Rate-Limit Notifications](#slack-rate-limit-notifications)
+- [Slack Notifications](#slack-notifications)
 - [Search and Queue Dashboard](#search-and-queue-dashboard)
-- [API Quick Test](#api-quick-test)
-- [Demo Video Checklist](#demo-video-checklist)
-- [Feature Mapping](#feature-mapping)
-- [Assumptions, Trade-offs, and Limitations](#assumptions-trade-offs-and-limitations)
+- [API Reference](#api-reference)
+- [Deploy on Render](#deploy-on-render)
+- [Limitations and Trade-offs](#limitations-and-trade-offs)
 - [Troubleshooting](#troubleshooting)
+- [Submission Checklist](#submission-checklist)
 
 ---
 
 ## Features
 
-- **Email composition:** Select a sender, enter recipients, add a subject and message body, and configure sending options.
-- **Recipient lists:** Enter recipients directly or upload a recipient list through the compose interface.
-- **Send now or schedule:** Submit a batch for the earliest available send slots, or choose a future start time.
-- **Scheduled and Sent views:** Review email status and scheduled/sent records from the dashboard.
-- **Batch scheduling:** Store shared batch details once and persist an individual record for each recipient.
-- **Rate limiting:** Enforce a per-sender hourly cap and a minimum interval between sends.
-- **Worker concurrency:** Configure how many jobs each worker process can process concurrently.
-- **Restart recovery:** Reconcile database records with BullMQ jobs when workers start.
-- **Idempotency safeguards:** Prevent duplicate queue entries and guard the database transition before sending.
-- **Google OAuth login:** Authenticate users with Google's authorization-code flow.
-- **Slack notifications:** Notify the connected Slack channel when a sender reaches its hourly limit or a message is deferred due to the limit.
-- **Search:** Search email records by recipient, subject, or body using Elasticsearch, with a SQL fallback.
-- **Queue visibility:** Inspect waiting, delayed, active, completed, and failed jobs using Bull Board.
-- **Ethereal previews:** Open a preview of a captured test email using the saved Ethereal preview URL.
+- **Compose:** pick a sender, add recipients as chips (type, paste, or upload a `.csv`/`.txt` file; duplicates are removed), write a subject and a rich-text body.
+- **Send now or send later:** with no start time, emails take the earliest available slots; with a future start time, they are scheduled from that moment.
+- **Delay between emails:** spaces recipients out from the start time.
+- **Per-batch hourly limit:** overrides the server default for that batch.
+- **Scheduled and Sent views:** status badges, live counts and 10-second auto-refresh.
+- **Email detail:** full message and a link to its Ethereal preview once sent.
+- **Search:** by recipient, subject or body, using Elasticsearch with an automatic SQL fallback.
+- **Rate limiting:** per-sender hourly cap plus a minimum interval, coordinated across workers through Redis.
+- **Restart recovery and idempotency:** MySQL is the source of truth; queue and database are reconciled when a worker starts, and an atomic claim prevents double sends.
+- **Google OAuth login** with server-side sessions, plus a no-login `dev` mode for local work.
+- **Slack alerts** when a sender reaches its hourly limit (one alert per sender per hour).
+- **Queue dashboard:** Bull Board shows waiting, delayed, active, completed and failed jobs.
 
 ---
 
@@ -54,198 +49,198 @@ The application lets authenticated users compose email batches, upload recipient
 
 | Area | Technology |
 |---|---|
-| Frontend | React, TypeScript, Vite |
-| Backend API | Node.js, Express, TypeScript |
-| Database | MySQL 8-compatible database, Drizzle ORM and SQL migrations |
-| Job queue and delayed jobs | BullMQ |
-| Queue, sessions and rate-limit state | Redis |
-| Search | Elasticsearch |
-| Test email transport | Ethereal Email / SMTP |
-| Authentication | Google OAuth 2.0 |
-| Notifications | Slack OAuth and incoming webhooks |
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS, TanStack Query, TipTap editor |
+| Backend API | Node.js, Express, TypeScript, Zod |
+| Database | MySQL 8, Drizzle ORM, SQL migrations |
+| Queue and delayed jobs | BullMQ |
+| Redis | Queue, sessions, rate-limit state |
+| Search | Elasticsearch 8 |
+| Test mail transport | Nodemailer + Ethereal SMTP |
+| Authentication | Google OAuth 2.0 (authorization-code flow) |
+| Notifications | Slack OAuth + incoming webhooks |
 | Local infrastructure | Docker Compose |
 
 ---
 
-## Architecture Overview
+## Architecture
 
 ```text
 React + Vite frontend
-        |
-        | HTTP requests / authentication
+        |  HTTP (/api, /admin)
         v
-Express API  --------------------> MySQL
-        |                       (persistent source of truth)
+Express API -----------------> MySQL            (source of truth)
         |
-        +----------------------> Redis + BullMQ
-        |                       (queue, delayed jobs, sessions,
-        |                        rate-limit state)
+        +--------------------> Redis + BullMQ   (delayed jobs, sessions, rate-limit state)
         |
-        +----------------------> Elasticsearch
-        |                       (search index)
+        +--------------------> Elasticsearch    (search index; optional)
+
+BullMQ worker  (separate process, same code base)
         |
-        v
-BullMQ worker
-        |
-        +----> Redis rate limiter
-        |
-        +----> Ethereal SMTP
-        |
-        +----> Slack notification (when applicable)
+        +--> Redis rate limiter (Lua script)
+        +--> Ethereal SMTP
+        +--> Slack webhook (when a limit is hit)
 ```
 
-**MySQL is the source of truth.** Redis/BullMQ manages job timing and execution; Elasticsearch is a searchable index rather than the authoritative store for email records.
+**MySQL is the source of truth.** Redis only holds timers and counters, and Elasticsearch is only an index. If Redis or Elasticsearch is wiped, nothing is lost: the worker rebuilds jobs from MySQL on startup.
 
-### Main scheduling flow
+### Scheduling flow
 
-1. The frontend submits a batch to `POST /api/emails/schedule`.
-2. The backend validates the input and verifies that the sender belongs to the authenticated user.
-3. A database transaction stores the batch and one email record per valid recipient.
-4. The backend enqueues one BullMQ job per email, using the email record ID as the job ID.
-5. A worker processes each eligible job, reserves a sender-specific rate-limit slot in Redis, and waits or defers the job if required.
-6. The worker atomically claims the email record by changing its status from `scheduled` to `sending`.
-7. The worker sends the message through the configured Ethereal SMTP transport.
-8. The database is updated to `sent` or `failed`, and the search index is updated asynchronously.
+1. The frontend calls `POST /api/emails/schedule`.
+2. The API validates the input and checks the sender belongs to the signed-in user.
+3. One database transaction stores the batch (subject and body, once) and one email row per recipient.
+4. The API enqueues one BullMQ delayed job per email, using the email's ID as the job ID.
+5. When a job is due, the worker reserves a send slot for the sender in Redis. If the slot is more than `INLINE_WAIT_MAX_MS` away, the job is put back in the delayed state instead of occupying a worker.
+6. The worker atomically claims the row (`scheduled` to `sending`). If it can't, another worker already has it and it skips.
+7. The worker sends through SMTP, then sets the row to `sent` (saving the Ethereal preview URL) or retries / marks it `failed`.
+8. The search index is updated in the background.
 
 ---
 
-## Prerequisites
+## Project Structure
 
-Install the following before running the application:
-
-- Node.js and npm (use a version compatible with the project's package files).
-- Docker Desktop with Docker Compose.
-- A Google OAuth client if you want to test Google login.
-- An Ethereal Email account or the project's Ethereal sender-seeding flow.
-- A Slack app and HTTPS callback URL if you want to test Slack OAuth locally.
-
-You will need internet access for Google OAuth, Slack OAuth, and creating Ethereal test accounts.
+```text
+.
+├── docker-compose.yml        MySQL, Redis, Elasticsearch for local development
+├── backend/
+│   ├── drizzle/              SQL migrations
+│   └── src/
+│       ├── server.ts         API entry point (also mounts Bull Board)
+│       ├── worker.ts         Worker entry point
+│       ├── config/           Environment parsing and validation
+│       ├── db/               Schema, client, migration runner
+│       ├── middleware/       Auth, error handler
+│       ├── queue/            BullMQ queue and Redis connection
+│       ├── routes/           auth, emails, senders, slack
+│       ├── services/         Scheduling, rate limiter, reconcile, mailer, search, Slack
+│       ├── workers/          Email job processor
+│       └── scripts/          seed:senders, load:test, search:reindex
+└── frontend/
+    └── src/
+        ├── api/              The only place that calls fetch
+        ├── components/       Layout and UI primitives
+        ├── features/         auth, compose, inbox, email-detail
+        ├── hooks/            React Query hooks
+        └── lib/ types/ routes/ config/
+```
 
 ---
 
-## Environment Configuration
+## Run Locally
 
-Create local environment files from the examples supplied by the project.
+### Prerequisites
 
-### Backend
+- Node.js and npm
+- Docker Desktop (Docker Compose)
+- Internet access (Ethereal test accounts are created online)
+- Optional: a Google OAuth client (real login) and a Slack app with an HTTPS tunnel such as ngrok (Slack alerts)
 
-From the repository root, in PowerShell:
-
-```powershell
-Copy-Item backend/.env.example backend/.env
-```
-
-### Frontend
-
-```powershell
-Copy-Item frontend/.env.example frontend/.env
-```
-
-Review both files and fill in the values needed for your setup. Do not commit `.env` files or secrets to GitHub.
-
-Backend configuration includes the database connection, Redis, Elasticsearch, authentication, session/cookie settings, SMTP/Ethereal configuration, worker settings, and optional Slack OAuth credentials. Use the variable names and formats in `backend/.env.example` as the source of truth.
-
-Frontend configuration includes the API/authentication mode and any `VITE_` variables documented in `frontend/.env.example`.
-
-### Worker settings
-
-The backend `.env` supports these worker and rate-limit settings:
-
-| Variable | Purpose | Example/default documented by this project |
-|---|---|---:|
-| `WORKER_CONCURRENCY` | Concurrent jobs per worker process | `5` |
-| `MIN_DELAY_BETWEEN_SENDS_MS` | Minimum gap between sends from the same sender | `2000` ms |
-| `MAX_EMAILS_PER_HOUR_PER_SENDER` | Default hourly limit for each sender | `200` in the project documentation; check your `.env.example` for the configured value |
-| `JOB_MAX_ATTEMPTS` | BullMQ retry attempts | `3` in the example configuration |
-| `STALE_SENDING_MINUTES` | Age after which a stuck `sending` record is treated as a crashed send | `5` in the example configuration |
-| `INLINE_WAIT_MAX_MS` | Maximum time a worker waits inline before deferring a job | `10000` ms in the example configuration |
-| `RATE_LIMIT_HORIZON_HOURS` | How far ahead the limiter may reserve hourly windows | `336` in the example configuration |
-
-The Compose form's **Hourly Limit** field can override the default hourly cap for that batch. Empty or zero uses the server default.
-
-> **Important:** Environment values may differ between local and deployed environments. Check the actual environment configuration for the environment you are testing. Restart the relevant backend/worker process after changing its environment.
-
----
-
-## Run the Application Locally
-
-Commands below are written for PowerShell on Windows. Run each service in the appropriate terminal.
-
-### 1. Start infrastructure
+### 1. Start the infrastructure
 
 From the repository root:
 
-```powershell
-docker compose up -d mysql redis elasticsearch
+```bash
+docker compose up -d
 docker compose ps
 ```
 
-This starts the database, Redis, and Elasticsearch services defined in Docker Compose. The project publishes MySQL on host port **3307** to avoid clashing with a local MySQL service on port 3306.
+This starts MySQL (published on host port **3307**, to avoid clashing with a local MySQL on 3306), Redis (with append-only persistence and a volume) and Elasticsearch. Elasticsearch is optional: if it is not running, search falls back to SQL. For a minimal setup, `docker compose up -d mysql redis` is enough.
 
-If your Compose file uses different service names, use the names shown by `docker compose config --services`.
+### 2. Configure and start the backend
 
-### 2. Install backend dependencies and migrate the database
+Create `backend/.env`. This minimal file runs everything locally **without** Google login:
 
-```powershell
+```env
+DATABASE_URL=mysql://reachinbox:reachinbox@localhost:3307/reachinbox
+REDIS_URL=redis://localhost:6379
+ELASTICSEARCH_URL=http://localhost:9200
+AUTH_MODE=dev
+```
+
+Every other variable has a default; see the [Configuration Reference](#configuration-reference).
+
+```bash
 cd backend
 npm install
-Copy-Item .env.example .env
 npm run db:migrate
-```
-
-If you already created `backend/.env`, do not overwrite it; update it manually from `.env.example` instead.
-
-### 3. Create test senders
-
-```powershell
-npm run seed:senders 2
-```
-
-This project script creates two Ethereal SMTP test senders and requires internet access. If your environment already provisions a default sender, you can use the sender shown in the application instead.
-
-### 4. Start the API and worker
-
-```powershell
 npm run dev
 ```
 
-The project README describes this command as starting the API on port `4000` with the worker running alongside it.
+`npm run dev` starts the API and the worker together (using `concurrently`). You should see `API listening on :4000` and `Email worker started`. To run them separately, use `npm run dev:api` and `npm run dev:worker`; you can start extra workers the same way.
 
-The API and worker have separate entry points (`src/server.ts` and `src/worker.ts`). If you need separate processes, inspect the scripts in `backend/package.json`; the project also documents `npm run dev:worker` for starting an additional worker in another terminal.
+### 3. Configure and start the frontend
 
-The local API is expected at:
+Create `frontend/.env`:
 
-- API: `http://localhost:4000`
-- Bull Board: `http://localhost:4000/admin/queues`
+```env
+VITE_AUTH_MODE=dev
+```
 
-### 5. Start the frontend
-
-Open a new terminal at the repository root:
-
-```powershell
+```bash
 cd frontend
 npm install
-Copy-Item .env.example .env
 npm run dev
 ```
 
-The frontend is expected at:
+Open **http://localhost:5173**. The Vite dev server proxies `/api` and `/admin` to the backend on port 4000.
 
-- Frontend: `http://localhost:5173`
+### 4. Get a sender
 
-The Vite development server is configured to proxy `/api` requests to the backend on port `4000`. Use `localhost` consistently for the local Google OAuth flow so that the callback URL and cookies match.
+Open **Compose** and click **+ New test sender**. This creates a fresh Ethereal inbox and stores it as a sender. Alternatively, from `backend`, run `npm run seed:senders 2` to create two (this script attaches senders to the dev user, so it needs `AUTH_MODE=dev`).
 
-### 6. Useful development commands
+### Useful commands
 
-Run these from the relevant package directory:
+| Where | Command | What it does |
+|---|---|---|
+| backend | `npm run build` | Compile TypeScript to `dist/` |
+| backend | `npm run typecheck` | Type-check without emitting |
+| backend | `npm run db:generate` | Generate a migration after editing `schema.ts` |
+| backend | `npm run db:migrate` | Apply migrations |
+| backend | `npm run load:test -- --count 1000 --limit 5 --wait 20` | Schedule many emails at once and show where each lands (needs `AUTH_MODE=dev`, the API and a worker) |
+| backend | `npm run search:reindex` | Rebuild the search index (`-- --reset` drops it first) |
+| frontend | `npm run build` | Type-check and produce a production build |
+| frontend | `npm test` | Run the Vitest suite |
+| frontend | `npm run typecheck` | Type-check only |
 
-```powershell
-npm run build
-npm test
-npm run typecheck
-```
+---
 
-The frontend project documents these scripts. Available backend scripts can be checked in `backend/package.json`.
+## Configuration Reference
+
+### Backend (`backend/.env`)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | **required** | MySQL connection URL |
+| `REDIS_URL` | `redis://localhost:6379` | Queue, sessions, rate limiter |
+| `ELASTICSEARCH_URL` | `http://localhost:9200` | Search (falls back to SQL if unreachable) |
+| `ELASTICSEARCH_INDEX` | `emails` | Index name |
+| `PORT` | `4000` | API port |
+| `FRONTEND_URL` | `http://localhost:5173` | Allowed CORS origin and post-login redirect target |
+| `AUTH_MODE` | `dev` | `dev` = no login; `google` = Google OAuth |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | - | Needed when `AUTH_MODE=google` |
+| `GOOGLE_REDIRECT_URI` | `http://localhost:5173/api/auth/google/callback` | Must match the Google console exactly |
+| `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET` | - | Optional, for Slack alerts |
+| `SLACK_REDIRECT_URI` | - | HTTPS URL ending in `/api/slack/callback` |
+| `SESSION_TTL_DAYS` | `7` | Session lifetime |
+| `COOKIE_SECURE` | `false` | Set `true` whenever the site is served over HTTPS |
+| `WORKER_CONCURRENCY` | `5` | Jobs processed in parallel per worker process |
+| `MIN_DELAY_BETWEEN_SENDS_MS` | `2000` | Minimum gap between two sends from the same sender |
+| `MAX_EMAILS_PER_HOUR_PER_SENDER` | `200` | Default hourly cap per sender |
+| `JOB_MAX_ATTEMPTS` | `3` | Send attempts before an email is marked `failed` |
+| `STALE_SENDING_MINUTES` | `5` | Age after which a stuck `sending` row is treated as a crashed send |
+| `INLINE_WAIT_MAX_MS` | `10000` | Longest a worker sleeps for a slot before deferring the job |
+| `RATE_LIMIT_HORIZON_HOURS` | `336` | How far ahead hourly windows may be reserved |
+
+Restart the API and worker after changing any of these.
+
+### Frontend (`frontend/.env`)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `VITE_AUTH_MODE` | `google` | `dev` or `google`; must match the backend's `AUTH_MODE` |
+| `VITE_API_BASE` | `/api` | Base path for API calls. Keep the default when `/api` is proxied or rewritten to the backend |
+| `VITE_BACKEND_URL` | `http://localhost:4000` | Target of the Vite dev-server proxy (development only) |
+
+`VITE_` variables are baked in at build time, so rebuild and redeploy after changing them.
 
 ---
 
@@ -253,222 +248,140 @@ The frontend project documents these scripts. Available backend scripts can be c
 
 ### Send now
 
-When no future start time is selected, the frontend omits `startTime` from the effective JSON payload. The backend treats a missing or past start time as the current time, so the job becomes eligible for processing as soon as the queue and worker can process it.
-
-**Send now does not bypass the rate limiter.** A message can still wait if the sender's next available slot is in the future or the hourly quota has been reserved.
+With no start time, the backend uses the current time. **Send now does not bypass the rate limiter:** an email can still wait for the sender's next free slot or the next hour if the quota is used up.
 
 ### Send later
 
-When a future start time is selected, the backend saves that start time and assigns each recipient a scheduled time based on the configured delay between emails.
-
-Conceptually:
+With a future start time, recipient *n* is scheduled at:
 
 ```text
 recipient 1: start time
 recipient 2: start time + delay
-recipient 3: start time + 2 × delay
+recipient 3: start time + 2 x delay
 ...
 ```
 
-BullMQ stores delayed jobs and makes them eligible when their delay expires. The worker then applies the rate-limit slot before sending.
+BullMQ holds each job until its time, then the worker applies the rate-limit slot before sending.
 
 ### Status lifecycle
 
-The main statuses used by the worker are:
-
-- `scheduled`: persisted and waiting for processing or a future send slot.
-- `sending`: claimed by a worker that is attempting to send the message.
-- `sent`: the SMTP send completed and the database was updated.
-- `failed`: sending failed permanently, or a stale in-progress send was marked failed during recovery.
-
-The Scheduled page may include messages waiting for a future time or waiting for a rate-limit slot. Check the job in Bull Board and the backend logs when diagnosing an unexpected delay.
+| Status | Meaning |
+|---|---|
+| `scheduled` | Saved and waiting, either for its time or for a send slot |
+| `sending` | Claimed by a worker that is sending it right now |
+| `sent` | SMTP accepted the message; the Ethereal preview URL is saved |
+| `failed` | Retries were exhausted, or a stuck `sending` row was marked failed by recovery |
 
 ---
 
 ## Persistence and Restart Recovery
 
-- **Database:** MySQL stores batch details, recipient email records, status, scheduled times, attempts, and send results.
-- **Queue persistence:** Redis is configured with append-only-file (AOF) persistence and a Docker volume in the local setup, so BullMQ jobs can survive service restarts when Redis data is preserved.
-- **Reconciliation:** On worker startup, the application reconciles scheduled database records with BullMQ jobs. A scheduled record that has no corresponding queue job can be enqueued again. Overdue records become eligible for processing.
-- **Duplicate queue protection:** `jobId` is set to the email record ID, so repeated attempts to add the same job do not normally create a second queue job while that job ID exists.
-- **Database claim protection:** Before sending, the worker atomically updates the record from `scheduled` to `sending`. A worker that cannot claim the row skips it.
-- **Crash during sending:** If a process crashes after the SMTP server accepts a message but before the database records success, the application cannot reliably know whether delivery occurred. The documented recovery strategy marks stale `sending` records as failed rather than automatically sending them again, reducing the risk of duplicate mail.
+- **MySQL** stores batches, per-recipient emails, status, scheduled times, attempts and results.
+- **Redis** runs with append-only persistence and a volume locally, so queued jobs survive restarts as long as the volume does.
+- **Reconciliation on worker start:** any `scheduled` row with no matching queue job is re-enqueued, and rows stuck in `sending` past `STALE_SENDING_MINUTES` are marked `failed`.
+- **No duplicate jobs:** the job ID equals the email ID, so adding the same job twice has no effect.
+- **No duplicate sends:** the `scheduled` to `sending` update is atomic, so only one worker can claim a row.
+- **Crash during a send:** if the process dies after SMTP accepted a message but before the database was updated, the outcome can't be known. The design marks such rows `failed` rather than sending again, because a duplicate email is worse than a missed one.
 
-### Demonstrating restart recovery
+### Try it
 
-1. Schedule one or more emails for a future time.
-2. Confirm they appear in the Scheduled view.
-3. Stop and restart the API/worker processes while preserving MySQL and Redis data.
-4. Confirm the scheduled records remain available and the worker resumes processing eligible jobs.
-5. For a clean demonstration, use test recipients and a short future schedule, and verify the result in the dashboard and Ethereal preview.
+1. Schedule a few emails a minute or two ahead and confirm they appear under Scheduled.
+2. Stop the API and worker, keeping the MySQL and Redis volumes.
+3. Start them again. The emails are still there and are sent at their time.
 
-Do not use `docker compose down -v` for this test: removing volumes can delete local persistent data.
+Don't use `docker compose down -v` for this: `-v` deletes the data volumes.
 
 ---
 
 ## Rate Limiting and Concurrency
 
-The rate limiter is implemented in `backend/src/services/rateLimiter.ts` with an atomic Redis Lua script.
+The limiter lives in `backend/src/services/rateLimiter.ts` and runs as a single atomic Redis Lua script, so any number of workers share one view of each sender.
 
-### Rules
+1. **Minimum gap:** each sender has a Redis pointer for its next free slot. A new slot is never earlier than that pointer or the current time.
+2. **Hourly cap:** every slot is counted against a UTC hour window. If that hour is full, the slot moves to the next hour with room, up to `RATE_LIMIT_HORIZON_HOURS` ahead. Emails are delayed, never dropped.
+3. **Long waits are deferred:** if the slot is further away than `INLINE_WAIT_MAX_MS`, the job returns to the delayed state and frees the worker.
+4. **Retries take a new slot,** because every SMTP attempt counts toward the limit.
+5. **Concurrency:** `WORKER_CONCURRENCY` sets parallelism per process; more worker processes add capacity while the shared limiter keeps the per-sender limits correct.
 
-1. **Minimum delay:** Each sender has a Redis pointer representing the earliest available slot. The next slot is no earlier than the current time or that pointer.
-2. **Hourly cap:** Each slot is counted against a UTC epoch-hour window. If that window has reached its limit, the algorithm searches a later window, subject to the configured reservation horizon.
-3. **Shared state:** Redis coordinates reservations across worker processes, rather than relying on process-local counters.
-4. **Deferred jobs:** If a slot is farther away than `INLINE_WAIT_MAX_MS`, the worker moves the job to a delayed state instead of holding a worker slot while waiting.
-5. **Retries:** A retry after a send failure reserves a new slot because each SMTP attempt counts toward the sending limit.
-6. **Concurrency:** `WORKER_CONCURRENCY` controls the number of jobs a worker process may process concurrently. Running multiple worker processes adds capacity, while the shared Redis rate limiter continues to coordinate sender limits.
+### Test it
 
-### Testing rate limits
-
-For a controlled test:
-
-1. Use a test sender and a small recipient list.
-2. Set a low per-batch hourly limit in the Compose form, or adjust the local backend environment and restart the worker.
-3. Submit more emails than the limit.
-4. Observe the Scheduled and Sent views, backend logs, and Bull Board's delayed jobs.
-5. Confirm that emails beyond the current quota are deferred rather than silently dropped.
-6. Restore the intended limit after testing.
-
-**Avoid manually deleting Redis rate-limit keys while jobs are active.** Jobs can carry previously reserved slot timestamps, and resetting shared rate-limit state during processing can invalidate the spacing guarantees.
-
-### Design trade-offs
-
-- The implementation uses fixed UTC hour windows, not a rolling 60-minute window. A sender may use quota near both sides of an hour boundary.
-- A large backlog for one sender can delay later emails for that sender.
-- Redis is required for coordinated rate limiting. If Redis rate-limit data is lost, the counters are reset even if the database and queued jobs remain.
-- SMTP processing time can add small timing variations beyond the configured slot interval.
-
----
-
-## Ethereal Email Setup and Testing
-
-Ethereal is a test SMTP service. It captures messages so you can inspect their content without delivering them to real inboxes.
-
-### Configure it
-
-1. Review the backend environment example and identify the Ethereal/SMTP variables required by the project.
-2. Set the SMTP host, port, credentials, and security options using the values provided by Ethereal or the project's sender-seeding script.
-3. Keep credentials in `backend/.env`, never in frontend `VITE_` variables or committed source code.
-4. Restart the backend/worker after changing SMTP configuration.
-5. Use the application's sender selection and compose form to send a test message.
-
-If using the project seeding flow, run from `backend`:
-
-```powershell
-npm run seed:senders 2
+```bash
+cd backend
+npm run load:test -- --count 1000 --limit 5 --wait 20
 ```
 
-### Verify a sent email
+This schedules 1000 emails against a limit of 5 per hour and reports where each ends up. Only the emails that fit in the current hour are really sent; the rest receive later slots. You can also set a low **Hourly Limit** in the Compose form and submit more recipients than that.
 
-- Open the **Sent** view and inspect the message status.
-- Open the email's saved Ethereal `previewUrl` when available.
-- If the message remains Scheduled, inspect its BullMQ job in Bull Board and check the backend worker logs. A future time can be caused by the selected start time, an already-reserved rate-limit slot, or an exhausted hourly quota.
-
-Ethereal previews demonstrate that the test transport captured the message; they are not proof of delivery to a real recipient inbox.
+Don't delete Redis rate-limit keys while jobs are active: jobs carry their reserved slot times, and resetting the shared state breaks the spacing guarantee.
 
 ---
 
 ## Google Login
 
-The application supports Google OAuth 2.0 authorization-code login.
+1. In Google Cloud Console, create an OAuth client of type **Web application**.
+2. Add the authorized JavaScript origin `http://localhost:5173`.
+3. Add the authorized redirect URI `http://localhost:5173/api/auth/google/callback`.
+4. If the consent screen is in Testing mode, add your Google account as a test user.
+5. In `backend/.env`, set `AUTH_MODE=google`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REDIRECT_URI` (same value as step 3).
+6. In `frontend/.env`, set `VITE_AUTH_MODE=google`.
+7. Restart both and open `http://localhost:5173`. Use `localhost` consistently, not `127.0.0.1`, so the callback and cookies match.
 
-### Local setup
+How it works: the server sets a random `state` cookie and checks it on return, exchanges the authorization code, requires a **verified** Google email, then creates or finds the user. The browser gets an `HttpOnly`, `SameSite=Lax` session cookie; the session itself is stored in Redis, so logging out ends it immediately. Every query is scoped to the signed-in user.
 
-1. In Google Cloud Console, create an OAuth client ID of type **Web application**.
-2. Add this authorized JavaScript origin:
-
-   ```text
-   http://localhost:5173
-   ```
-
-3. Add this authorized redirect URI, matching `GOOGLE_REDIRECT_URI` exactly:
-
-   ```text
-   http://localhost:5173/api/auth/google/callback
-   ```
-
-4. If the consent screen is in Testing mode, add the intended Google accounts under the OAuth audience's test users.
-5. Set `AUTH_MODE=google` and the Google client ID, client secret, and redirect URI in `backend/.env`.
-6. Set `VITE_AUTH_MODE=google` in `frontend/.env`.
-7. Restart the relevant processes and open `http://localhost:5173`.
-
-Use `localhost` consistently rather than switching between `localhost` and `127.0.0.1`.
-
-### Authentication overview
-
-- The server creates a random OAuth `state` value and verifies it when Google redirects back.
-- The server exchanges the authorization code and obtains the user's profile.
-- The application requires a verified email and creates or finds the corresponding user.
-- The browser receives a session cookie; session data is stored server-side in Redis.
-- API queries are scoped to the authenticated user.
-
-`AUTH_MODE=dev` and `VITE_AUTH_MODE=dev` are available for local development if configured by the project. They bypass real login and should not be used as production authentication.
+> **Warning:** `AUTH_MODE=dev` turns authentication off entirely, and it is the default when the variable is missing. Never run a deployed instance without setting `AUTH_MODE=google` explicitly.
 
 ---
 
-## Slack Rate-Limit Notifications
+## Slack Notifications
 
-When a sender's hourly quota is reached or an email is deferred because of rate limiting, the application can notify the user's connected Slack channel.
+When a sender reaches its hourly limit, the connected Slack channel gets a message. Alerts are sent in the background (so a slow Slack never delays email) and deduplicated to one per sender per hour.
 
-### Configure Slack OAuth
+1. Create an app at [api.slack.com/apps](https://api.slack.com/apps) and enable **Incoming Webhooks** and OAuth.
+2. Slack requires HTTPS redirect URLs. Locally, start a tunnel to the backend (`ngrok http 4000`) and register `https://<your-tunnel>/api/slack/callback` as the redirect URL in the Slack app.
+3. Set `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET` and `SLACK_REDIRECT_URI` (the same URL) in `backend/.env`, then restart.
+4. In the app, open the user menu, choose **Connect Slack**, authorize, and pick a channel.
+5. Use **Send test message** to confirm, then trigger a limit (see [Rate Limiting](#rate-limiting-and-concurrency)).
 
-1. Create an app at [api.slack.com/apps](https://api.slack.com/apps).
-2. Configure the required incoming-webhook capability and permissions for the app.
-3. Set the Slack OAuth client ID, client secret, and callback URL in `backend/.env`.
-4. Slack requires HTTPS callback URLs. For local development, use a trusted HTTPS tunnel such as ngrok and register the exact callback URL in the Slack app configuration.
-5. Restart the backend/worker after changing configuration.
-
-Use the callback path configured by the project (the documented local route is `/api/slack/callback`). If the tunnel URL changes, update the Slack app and environment value.
-
-### Connect and test
-
-1. Sign in to the dashboard.
-2. Open the user menu and select **Connect Slack**.
-3. Authorize the Slack app and select the channel.
-4. Use **Send test message** if shown in the connected Slack menu.
-5. Trigger a controlled rate-limit test and verify that the notification appears in the chosen channel.
-
-The notifier runs in the background so a slow Slack request should not block email processing. Notifications are deduplicated by sender/hour to avoid one alert per deferred email.
+If the tunnel URL changes, update both the Slack app and `SLACK_REDIRECT_URI`. The webhook URL is stored in the database as plain text.
 
 ---
 
 ## Search and Queue Dashboard
 
-### Elasticsearch search
+### Search
 
-The search field supports queries over recipient addresses, subjects, and message bodies.
+The search box matches recipient, subject and body. Elasticsearch decides which emails match and MySQL supplies the rows. If Elasticsearch is unreachable, the API logs a warning and uses a SQL substring search instead. New or changed emails are indexed in the background, so they can take a moment to appear in search. To rebuild the index: `npm run search:reindex` (add `-- --reset` to drop it first).
 
-- MySQL remains the source of truth; Elasticsearch supplies matching IDs/results.
-- Index updates run asynchronously when records are created or their status or scheduled time changes.
-- Search falls back to a SQL substring query if Elasticsearch is unavailable.
-- To rebuild the index, run this from `backend` if the script exists in your package scripts:
+### Queue dashboard (Bull Board)
 
-  ```powershell
-  npm run search:reindex
-  ```
-
-  The project documentation also describes `npm run search:reindex -- --reset` for rebuilding after dropping the index.
-
-A newly scheduled email may take a short time to appear in search because indexing is asynchronous.
-
-### Bull Board
-
-Open the local queue dashboard at:
-
-```text
-http://localhost:4000/admin/queues
-```
-
-Bull Board can show waiting, delayed, active, completed, and failed BullMQ jobs, along with job data. A job deferred by the rate limiter should appear as delayed. The endpoint is protected by the application's authentication in the documented setup.
+Open **http://localhost:4000/admin/queues** (or use **Queue dashboard** in the sidebar, which goes through the Vite proxy). It shows the `email-send` queue's waiting, delayed, active, completed and failed jobs. An email held by the rate limiter appears as **delayed**. The dashboard requires a signed-in session (any request passes in `dev` mode).
 
 ---
 
-## API Quick Test
+## API Reference
 
-The following example assumes the API is running locally, authentication is configured to permit the request, and `jq` is available. Use an actual sender ID belonging to the authenticated user.
+All `/api` routes except the OAuth callbacks require a session (or `AUTH_MODE=dev`).
 
-### Schedule a batch
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/health` | Checks MySQL and the queue; `200 {ok:true}` or `503` |
+| GET | `/api/auth/google` | Starts Google login |
+| GET | `/api/auth/google/callback` | Google redirects here |
+| GET | `/api/auth/me` | Current user |
+| POST | `/api/auth/logout` | Ends the session |
+| POST | `/api/emails/schedule` | Schedule a batch |
+| GET | `/api/emails/scheduled` | Scheduled emails (supports search and paging) |
+| GET | `/api/emails/sent` | Sent and failed emails |
+| GET | `/api/emails/counts` | Counts for the sidebar |
+| GET | `/api/emails/:id` | One email with its body |
+| GET | `/api/senders` | The user's senders |
+| POST | `/api/senders/ethereal` | Create a new Ethereal test sender |
+| GET | `/api/slack/status`, `/connect` | Slack connection state / start OAuth |
+| GET | `/api/slack/callback` | Slack redirects here |
+| POST | `/api/slack/disconnect`, `/test` | Disconnect / send a test message |
+| GET | `/admin/queues` | Bull Board |
+
+### Example: schedule a batch (local, `AUTH_MODE=dev`)
 
 ```bash
 SID=$(curl -s http://localhost:4000/api/senders | jq -r '.[0].id')
@@ -485,137 +398,175 @@ curl -X POST http://localhost:4000/api/emails/schedule \
   }"
 ```
 
-The example uses a future start time. To request the earliest available send slots, omit `startTime` from the JSON body. The rate limiter still applies.
+Omit `startTime` to send as soon as slots allow. Optional `hourlyLimit` overrides the default cap for the batch. With `AUTH_MODE=google`, these requests need the session cookie.
 
-### Inspect scheduled emails and counts
+---
 
-```bash
-curl http://localhost:4000/api/emails/scheduled
-curl http://localhost:4000/api/emails/counts
+## Deploy on Render
+
+This setup uses three things: a **Web Service** for the backend (API and worker), a **Static Site** for the frontend, and external MySQL and Redis instances.
+
+### How the pieces connect
+
+The session cookie is `SameSite=Lax`, so the browser must treat the frontend and the API as **one origin**. Render's Static Site can do that with rewrite rules that proxy `/api` and `/admin` to the backend, mirroring what the Vite proxy does locally. The frontend then keeps its default `VITE_API_BASE=/api`, and cookies, Google login and the queue dashboard all work from the frontend's own address.
+
+### 1. Provision data services
+
+- **MySQL 8-compatible database.** Render does not offer managed MySQL, so use an external provider.
+- **Redis** (for example Render Key Value). BullMQ requires the eviction policy to be **`noeviction`**; set it on the instance.
+- **Elasticsearch is optional.** Leave `ELASTICSEARCH_URL` unreachable and search uses SQL.
+
+### 2. Backend Web Service
+
+| Setting | Value |
+|---|---|
+| Root directory | `backend` |
+| Build command | `npm install --include=dev && npm run build` |
+| Start command | `npx concurrently -k -n api,worker "npm run start:api" "npm run start:worker"` |
+| Health check path | `/health` |
+
+- **Do not add a `NODE_ENV` environment variable.** Render sets it itself at runtime; setting it to `production` yourself makes the build skip dev dependencies, and `tsc` then fails with "not found".
+- The start command runs the API and the worker in one service, because the free plan has no separate Background Worker. The worker does not serve HTTP, so it needs no port of its own. With a paid plan, create a second service that runs `npm run start:worker` instead.
+
+Environment variables (replace the placeholders with your URLs):
+
+```env
+DATABASE_URL=mysql://USER:PASSWORD@HOST:PORT/DBNAME
+REDIS_URL=rediss://...
+AUTH_MODE=google
+COOKIE_SECURE=true
+FRONTEND_URL=https://YOUR-FRONTEND.onrender.com
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_REDIRECT_URI=https://YOUR-FRONTEND.onrender.com/api/auth/google/callback
+# Optional, for Slack alerts. Registered with Slack exactly as written:
+SLACK_CLIENT_ID=...
+SLACK_CLIENT_SECRET=...
+SLACK_REDIRECT_URI=https://YOUR-BACKEND.onrender.com/api/slack/callback
 ```
 
-If Google authentication or session protection is enabled, these requests need a valid authenticated session/cookie. The exact API response depends on the project's route implementation.
+Add the same `GOOGLE_REDIRECT_URI` to your Google OAuth client, and your frontend URL as an authorized JavaScript origin.
 
----
+### 3. Run the database migrations
 
-## Demo Video Checklist
+The free plan has no pre-deploy step, so run migrations once from your computer against the hosted database (PowerShell shown):
 
-Keep the demonstration to **five minutes or less**, as requested by the submission guidelines.
+```powershell
+cd backend
+$env:DATABASE_URL = "mysql://USER:PASSWORD@HOST:PORT/DBNAME"
+npm run db:migrate
+```
 
-Suggested sequence:
+Repeat this whenever you add a migration.
 
-1. **Compose and schedule (0:00–1:00)**
-   - Sign in.
-   - Compose an email with a subject, body, and a few test recipients.
-   - Show sending immediately or selecting a future send time.
-   - Submit the batch.
+### 4. Frontend Static Site
 
-2. **Dashboard (1:00–2:00)**
-   - Show the Scheduled view.
-   - Show the Sent view after processing.
-   - Open a sent message and show the Ethereal preview URL, if available.
-
-3. **Restart recovery (2:00–3:15)**
-   - Schedule a message for a short time in the future.
-   - Stop and restart the API/worker while preserving database and Redis volumes.
-   - Show that the pending message remains and is processed when eligible.
-
-4. **Rate limiting and delay (3:15–4:30)**
-   - Use a test sender and a deliberately small hourly cap.
-   - Submit more emails than the cap.
-   - Show deferred jobs in Bull Board and the corresponding Scheduled times.
-   - Optionally show the Slack notification if Slack is connected.
-
-5. **Wrap-up (4:30–5:00)**
-   - Briefly mention the database, BullMQ/Redis, worker concurrency, idempotency, and search.
-
-Use test addresses and Ethereal previews. Do not display secrets, OAuth tokens, session cookies, or private environment files in the recording.
-
----
-
-## Feature Mapping
-
-| Requirement area | Implemented functionality |
+| Setting | Value |
 |---|---|
-| Backend scheduler | Express scheduling API, persisted batches and email records, BullMQ delayed jobs |
-| Persistence | MySQL persistence, Redis AOF/volume for queue data, worker reconciliation after restart |
-| Rate limiting | Atomic Redis Lua slot reservation, per-sender hourly cap, configurable minimum send gap |
-| Concurrency | Configurable BullMQ worker concurrency; multiple workers share Redis coordination |
-| Idempotency | BullMQ job IDs based on email IDs and atomic database claim before sending |
-| Frontend login | Google OAuth login and session-backed authentication |
-| Frontend dashboard | Scheduled and Sent views, email counts and message details |
-| Compose | Sender selection, recipients, subject/body, recipient-list upload, delay and hourly limit controls, send-later scheduling |
-| Search | Elasticsearch search with SQL fallback |
-| Notifications | Slack OAuth connection and rate-limit notifications |
-| Development observability | Bull Board queue dashboard and Ethereal message previews |
+| Root directory | `frontend` |
+| Build command | `npm install --include=dev && npm run build` |
+| Publish directory | `dist` |
+| Environment | `VITE_AUTH_MODE=google` |
+
+Under **Redirects/Rewrites**, add these rules **in this order** (Render applies the first match, so the catch-all must come last):
+
+| Source | Destination | Action |
+|---|---|---|
+| `/api/*` | `https://YOUR-BACKEND.onrender.com/api/*` | Rewrite |
+| `/admin/*` | `https://YOUR-BACKEND.onrender.com/admin/*` | Rewrite |
+| `/*` | `/index.html` | Rewrite |
+
+The destinations must be the backend's **public** URL; Render's internal addresses don't work in rewrite rules. The last rule makes client-side routes such as `/compose` survive a page refresh.
+
+### 5. Verify the deployment
+
+1. Open `https://YOUR-BACKEND.onrender.com/health`. Expect `{"ok":true}`.
+2. In the backend logs, confirm both `API listening` and `Email worker started`.
+3. Open the frontend, sign in with Google, and check you land on the dashboard.
+4. Open `https://YOUR-FRONTEND.onrender.com/admin/queues` and confirm Bull Board loads.
+5. Schedule one test email and watch it move through the `email-send` queue.
+
+### 6. SMTP is blocked on Render's free plan
+
+Free Render Web Services block outbound traffic to SMTP ports 25, 465 and 587, so Ethereal sends time out there even when everything else is correct. Changing the HTTP port doesn't help. Your options:
+
+- Upgrade the backend to any paid instance type, which allows ports 465 and 587 (port 25 stays blocked everywhere).
+- Switch the mailer (`backend/src/services/mailer.ts`) to an email provider's HTTPS API.
+- Run the worker somewhere that allows outbound SMTP.
+
+Ethereal is a test inbox in every case. Delivering to real recipients needs a real provider with a verified sender or domain.
+
+### Free-plan behaviour
+
+Free Web Services spin down when idle and can restart. A sleeping worker cannot send, so emails scheduled for later can be delayed until the service wakes. The startup reconciliation re-enqueues anything that was missed. For dependable timing, use a paid instance.
 
 ---
 
-## Assumptions, Trade-offs, and Limitations
+## Limitations and Trade-offs
 
-- **Ethereal is for testing.** Messages are captured for inspection and are not delivered to actual recipient inboxes.
-- **Send now means earliest eligible processing.** It does not bypass a sender's reserved slots, hourly limit, worker availability, or SMTP processing.
-- **Hourly limits use fixed UTC hour windows.** They are not rolling 60-minute windows.
-- **Existing backlogs affect order and timing.** A large backlog for one sender can delay newer messages from the same sender.
-- **Redis rate-limit state matters.** Deleting rate-limit keys or clearing Redis while jobs are active can undermine send-spacing guarantees. Avoid flushing Redis during normal operation or the restart demonstration.
-- **SMTP outcome can be ambiguous after a crash.** If SMTP accepts a message but the process crashes before recording success, the application cannot always determine whether the message was accepted. The recovery strategy favors avoiding an automatic duplicate over guaranteeing a retry.
-- **Search indexing is asynchronous.** New or updated records can take a short time to appear in search.
-- **Production deployment requires production-grade configuration.** Use secure secrets, HTTPS, correct cookie settings, protected OAuth callbacks, durable database/Redis services, and monitoring appropriate to the deployment.
+- **Ethereal is for testing.** Previews prove the transport captured the message, not that it reached a real inbox.
+- **Fixed UTC hour windows.** Limits are per calendar hour, not a rolling 60 minutes, so a sender can use quota on both sides of an hour boundary.
+- **Backlogs queue up.** A large batch from one sender delays that sender's later emails; other senders are unaffected.
+- **Redis holds rate-limit state.** If Redis is wiped, counters reset even though MySQL and the queue are rebuilt.
+- **Recovery runs when a worker starts.** A row left in `sending` by a crashed worker, or emails saved just before the API crashed, are repaired at the next worker start, not continuously.
+- **After a crash, SMTP outcome can be unknown.** The design favors never duplicating an email over guaranteeing a retry.
+- **At-most-once sending per row.** A worker that loses its claim mid-send does not retry that row automatically.
+- **Search is eventually consistent.** Indexing is asynchronous.
+- **SMTP passwords and Slack webhooks are stored as plain text** in MySQL. Fine for Ethereal test senders; encrypt them before using real credentials.
+- **No rate limiting or security headers on the API itself,** and sessions do not slide: they expire `SESSION_TTL_DAYS` after login.
+- **Backend tests:** the backend is covered by type-checking and the load test; the automated unit and component tests are in the frontend.
 
 ---
 
 ## Troubleshooting
 
-### An email remains in Scheduled
+**An email stays in Scheduled**
+1. Check whether a future start time was chosen.
+2. Open Bull Board: is the job waiting, delayed, active, completed or failed?
+3. Look at the worker logs for rate-limit deferrals or SMTP errors.
+4. Check the sender's hourly limit and how many emails are already queued. Changing the limit in `.env` does not undo slots already reserved in Redis or on jobs.
 
-1. Check whether a future start time was selected.
-2. Open Bull Board and inspect whether the job is waiting, delayed, active, completed, or failed.
-3. Check the email's scheduled time and status in the dashboard.
-4. Review backend/worker logs for rate-limit deferral, SMTP errors, or worker errors.
-5. Check the sender's hourly limit and existing queued backlog.
-6. Remember that changing the hourly limit in `.env` does not erase slot reservations already recorded in Redis or on BullMQ jobs.
+**An email stays in Sending, or fails with an SMTP timeout**
+- Read the job's error in Bull Board and the worker logs.
+- On Render's free plan, outbound SMTP ports are blocked; see [SMTP is blocked](#6-smtp-is-blocked-on-renders-free-plan).
+- A stuck `sending` row is marked `failed` the next time a worker starts.
 
-### Google login fails
+**Google login fails**
+- The origin and redirect URI in Google must match `GOOGLE_REDIRECT_URI` exactly.
+- Use `localhost` consistently locally.
+- In Testing mode, your account must be a listed test user.
+- `AUTH_MODE` (backend) and `VITE_AUTH_MODE` (frontend) must agree.
 
-- Verify that the authorized origin and redirect URI exactly match the configured values.
-- Use `localhost` consistently for local development.
-- Ensure the account is listed as a test user if the OAuth consent screen is in Testing mode.
-- Check that the backend and frontend auth modes are configured consistently.
+**Signed in, but the app acts logged out on the deployed site**
+- The frontend and API must share one origin. Check the `/api/*` and `/admin/*` rewrite rules, that `VITE_API_BASE` is not set to a different domain, and that `COOKIE_SECURE=true` over HTTPS.
 
-### Slack callback fails
+**Refreshing a page on the deployed site shows 404**
+- Add the `/* → /index.html` rewrite as the **last** rule.
 
-- Confirm the callback URL is HTTPS and matches the Slack app configuration exactly.
-- Check the configured callback route and environment variables.
-- Update the Slack app and environment configuration if the tunnel URL changes.
+**Queue dashboard shows 401 or the wrong site**
+- Sign in first. On Render, make sure the `/admin/*` rewrite exists and open `/admin/queues` on the **frontend** URL.
 
-### Elasticsearch search does not return a new record
+**Slack callback fails**
+- The redirect URL must be HTTPS and identical in the Slack app and `SLACK_REDIRECT_URI`. Update both when a tunnel URL changes.
 
-- Allow for asynchronous indexing.
-- Confirm Elasticsearch is running.
-- Check backend logs for fallback warnings.
-- Rebuild the index using the project's documented script if needed.
+**Search misses a new email**
+- Indexing is asynchronous. Confirm Elasticsearch is running, check the logs for fallback warnings, or run `npm run search:reindex`.
 
-### Local services are not running
+**A local service isn't running**
 
-```powershell
+```bash
 docker compose ps
+docker compose logs mysql
 docker compose logs redis
 docker compose logs elasticsearch
-docker compose logs mysql
 ```
-
-Check the service names in `docker-compose.yml` if they differ.
 
 ---
 
-## Repository Submission Checklist
+## Submission Checklist
 
-Before submitting:
-
-- [ ] Keep the repository private.
-- [ ] Grant repository access to **Mitrajit** and **Yadav036**, as specified in the submission instructions.
-- [ ] Confirm `.env` files, client secrets, webhook URLs, and tokens are not committed.
-- [ ] Verify backend migrations and frontend build work from a clean checkout.
-- [ ] Test a scheduled email, a sent email, and a restart-recovery scenario.
-- [ ] Record a demo video no longer than five minutes.
-- [ ] Include the video link and any necessary setup notes in the submission, if requested.
+- [ ] The repository is private.
+- [ ] Access is granted to **Mitrajit** and **Yadav036**.
+- [ ] No `.env` files, client secrets, webhook URLs or tokens are committed (check `git log`, not just the working tree).
+- [ ] Migrations and both builds work from a clean checkout (`npm install`, `npm run db:migrate`, `npm run build`).
+- [ ] A scheduled email, a sent email and a restart-recovery scenario have been tested.

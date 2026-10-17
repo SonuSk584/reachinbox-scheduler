@@ -4,6 +4,8 @@ import { Button } from '@/components/ui';
 import { useCounts } from '@/hooks/useEmails';
 import { cn } from '@/lib/cn';
 import { UserMenu } from './UserMenu';
+const API_BASE =
+  import.meta.env.VITE_API_BASE || 'http://localhost:4000';
 
 interface NavItemProps {
   to: string;
@@ -49,7 +51,7 @@ export function Sidebar() {
       </nav>
 
       <a
-        href="/admin/queues"
+        href={`${API_BASE}/admin/queues`}
         target="_blank"
         rel="noreferrer"
         className="mt-auto flex h-9 items-center gap-2.5 rounded-lg px-3 text-xs text-ink-soft transition-colors hover:bg-field"
