@@ -51,7 +51,7 @@ export function Sidebar() {
       </nav>
 
       <a
-        href={`${API_BASE}/admin/queues`}
+         href={`${(import.meta.env.VITE_API_BASE || 'http://localhost:4000/api').replace(/\/api\/?$/, '')}/admin/queues`}
         target="_blank"
         rel="noreferrer"
         className="mt-auto flex h-9 items-center gap-2.5 rounded-lg px-3 text-xs text-ink-soft transition-colors hover:bg-field"
